@@ -115,9 +115,13 @@ async def draft_video(req: DraftRequest):
         return _safe_json_loads(response.text)
     except Exception as e:
         err_str = str(e)
+        # Sanitize error string to prevent API key leaks
+        if GEMINI_API_KEY:
+            err_str = err_str.replace(GEMINI_API_KEY, "REDACTED_API_KEY")
+            
         if "API_KEY_INVALID" in err_str or "expired" in err_str.lower():
             raise HTTPException(status_code=401, detail="La API Key de Gemini ha caducado o es inválida.")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=err_str)
 
 @app.post("/v1/analyzer/storyboard")
 async def storyboard(req: StoryboardRequest):

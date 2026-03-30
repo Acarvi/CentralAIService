@@ -25,6 +25,11 @@ Refina un guion basado en feedback.
 ### `GET /health`
 Estado del servicio.
 
+## Seguridad y Errores
+- **Protección de Secretos**: Todas las claves se manejan vía `.env` (excluido de Git).
+- **Sanitización**: Los mensajes de error de la API de Google son procesados para eliminar cualquier rastro de la `GEMINI_API_KEY` antes de ser devueltos al cliente o registrados en logs.
+- **Validación de JSON**: Incluye lógica de recuperación para respuestas de LLM malformadas o truncadas.
+
 ## Instalación
 ```bash
 pip install -r requirements.txt

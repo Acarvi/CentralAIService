@@ -2,6 +2,9 @@ import os
 import json
 import time
 import httpx
+import logging
+import traceback
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.responses import JSONResponse
@@ -11,6 +14,14 @@ from google.genai import types
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Logging Setup
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger("CentralAI")
 
 app = FastAPI(title="CentralAIService", version="1.0.0")
 
@@ -112,10 +123,13 @@ async def health():
 
 @app.post("/v1/analyzer/draft")
 async def draft_video(req: DraftRequest):
+    logger.info(f"📥 Petición recibida: /v1/analyzer/draft | Video: {os.path.basename(req.video_path)}")
     if not os.path.exists(req.video_path):
+        logger.warning(f"❌ Video no encontrado: {req.video_path}")
         raise HTTPException(status_code=404, detail=f"Video file not found: {req.video_path}")
 
     try:
+        logger.info("📤 Subiendo video a Gemini...")
         video_file = client.files.upload(
             file=req.video_path,
             config=types.UploadFileConfig(
@@ -135,13 +149,20 @@ async def draft_video(req: DraftRequest):
         if req.target_format.lower() == "reel" and req.context_script:
             prompt += f"\n\nBASA EL REEL EN ESTE GUION LARGO (CONTEXTO): \n{req.context_script}"
 
+        logger.info("🧠 Consultando Gemini para el script...")
+        start_time = datetime.now()
         response = client.models.generate_content(
             model="gemini-2.0-flash",
             contents=[video_file, prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info(f"✨ Gemini respondió en {duration:.2f}s")
+        
         return _safe_json_loads(response.text)
     except Exception as e:
+        logger.error(f"💥 Error en /analyzer/draft: {e}")
+        traceback.print_exc()
         err_str = redact_sensitive(str(e))
         if "API_KEY_INVALID" in err_str or "expired" in err_str.lower():
             return JSONResponse(status_code=401, content={"error": "API_KEY_EXPIRED"})
@@ -149,6 +170,7 @@ async def draft_video(req: DraftRequest):
 
 @app.post("/v1/analyzer/storyboard")
 async def storyboard(req: StoryboardRequest):
+    logger.info("📥 Petición recibida: /v1/analyzer/storyboard")
     try:
         prompt = "Decide visuales (image/animation) para este guion JSON."
         if req.global_comments:
@@ -156,6 +178,7 @@ async def storyboard(req: StoryboardRequest):
 
         full_prompt = f"{prompt}\n\nGuion actual:\n{json.dumps(req.script_data, indent=2, ensure_ascii=False)}"
         
+        logger.info("🧠 Consultando Gemini para el storyboard...")
         response = client.models.generate_content(
             model="gemini-2.0-flash",
             contents=full_prompt,
@@ -163,10 +186,12 @@ async def storyboard(req: StoryboardRequest):
         )
         return _safe_json_loads(response.text)
     except Exception as e:
+        logger.error(f"💥 Error en /analyzer/storyboard: {e}")
         return JSONResponse(status_code=500, content={"error": redact_sensitive(str(e))})
 
 @app.post("/v1/analyzer/refine")
 async def refine(req: RefineRequest):
+    logger.info("📥 Petición recibida: /v1/analyzer/refine")
     try:
         prompt = f"""
         Refina el siguiente guion basado en este feedback: "{req.feedback}"
@@ -176,6 +201,7 @@ async def refine(req: RefineRequest):
         if req.global_comments:
             prompt += f'\n\nCONSIDERACIÓN GLOBAL ADICIONAL:\n{req.global_comments}'
 
+        logger.info("🧠 Consultando Gemini para la refinación...")
         response = client.models.generate_content(
             model="gemini-2.0-flash",
             contents=prompt,
@@ -183,11 +209,13 @@ async def refine(req: RefineRequest):
         )
         return _safe_json_loads(response.text)
     except Exception as e:
+        logger.error(f"💥 Error en /analyzer/refine: {e}")
         return JSONResponse(status_code=500, content={"error": redact_sensitive(str(e))})
 
 @app.api_route("/v1/comfyui/proxy/{path:path}", methods=["GET", "POST"])
 async def comfyui_proxy(path: str, request: Request):
     """Proxy requests to local ComfyUI server."""
+    logger.info(f"🔄 Proxying request to ComfyUI: {path}")
     url = f"{COMFYUI_URL}/{path}"
     
     # Forward query parameters

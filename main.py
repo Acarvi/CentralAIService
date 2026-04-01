@@ -1,8 +1,10 @@
 import os
 import json
 import time
+import httpx
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
@@ -17,6 +19,17 @@ client = genai.Client(
     api_key=GEMINI_API_KEY,
     http_options={"timeout": 120000},
 )
+
+COMFYUI_URL = os.getenv("COMFYUI_URL", "http://localhost:8188")
+
+def redact_sensitive(text: str) -> str:
+    """Robust redaction of API keys and secrets."""
+    if not text:
+        return text
+    # Redact Gemini Key if present
+    if GEMINI_API_KEY and len(GEMINI_API_KEY) > 5:
+        text = text.replace(GEMINI_API_KEY, "[REDACTED_GEMINI_KEY]")
+    return text
 
 class DraftRequest(BaseModel):
     video_path: str
@@ -80,7 +93,22 @@ def _safe_json_loads(text: str) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": time.time()}
+    comfy_status = "offline"
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(f"{COMFYUI_URL}/queue")
+            if resp.status_code == 200:
+                comfy_status = "online"
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "timestamp": time.time(),
+        "dependencies": {
+            "comfyui": comfy_status
+        }
+    }
 
 @app.post("/v1/analyzer/draft")
 async def draft_video(req: DraftRequest):
@@ -114,13 +142,9 @@ async def draft_video(req: DraftRequest):
         )
         return _safe_json_loads(response.text)
     except Exception as e:
-        err_str = str(e)
-        # Sanitize error string to prevent API key leaks
-        if GEMINI_API_KEY:
-            err_str = err_str.replace(GEMINI_API_KEY, "REDACTED_API_KEY")
-            
+        err_str = redact_sensitive(str(e))
         if "API_KEY_INVALID" in err_str or "expired" in err_str.lower():
-            raise HTTPException(status_code=401, detail="La API Key de Gemini ha caducado o es inválida.")
+            return JSONResponse(status_code=401, content={"error": "API_KEY_EXPIRED"})
         raise HTTPException(status_code=500, detail=err_str)
 
 @app.post("/v1/analyzer/storyboard")
@@ -139,7 +163,7 @@ async def storyboard(req: StoryboardRequest):
         )
         return _safe_json_loads(response.text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(status_code=500, content={"error": redact_sensitive(str(e))})
 
 @app.post("/v1/analyzer/refine")
 async def refine(req: RefineRequest):
@@ -159,7 +183,33 @@ async def refine(req: RefineRequest):
         )
         return _safe_json_loads(response.text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(status_code=500, content={"error": redact_sensitive(str(e))})
+
+@app.api_route("/v1/comfyui/proxy/{path:path}", methods=["GET", "POST"])
+async def comfyui_proxy(path: str, request: Request):
+    """Proxy requests to local ComfyUI server."""
+    url = f"{COMFYUI_URL}/{path}"
+    
+    # Forward query parameters
+    params = dict(request.query_params)
+    
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        try:
+            if request.method == "GET":
+                resp = await client.get(url, params=params)
+            else:
+                body = await request.body()
+                headers = dict(request.headers)
+                # Remove host to avoid conflicts
+                headers.pop("host", None)
+                resp = await client.post(url, content=body, params=params, headers=headers)
+                
+            return JSONResponse(
+                status_code=resp.status_code,
+                content=resp.json() if "application/json" in resp.headers.get("content-type", "") else resp.content
+            )
+        except Exception as e:
+            return JSONResponse(status_code=502, content={"error": f"ComfyUI Proxy Error: {redact_sensitive(str(e))}"})
 
 if __name__ == "__main__":
     import uvicorn

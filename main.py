@@ -73,19 +73,19 @@ def _safe_json_loads(text: str) -> dict:
         pass
         
     letters = "a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9"
-    current_text = re.sub(rf'(?<=[{letters}\s！？。，])"(?=[{letters}\s！？。，])', r'\"', current_text)
-    current_text = re.sub(rf'(?<=[{letters}\s])"(?=[.!?])', r'\"', current_text)
+    processed_text = re.sub(rf'(?<=[{letters}\s！？。，])"(?=[{letters}\s！？。，])', r'\"', processed_text)
+    processed_text = re.sub(rf'(?<=[{letters}\s])"(?=[.!?])', r'\"', processed_text)
 
     try:
-        return json.loads(current_text)
+        return json.loads(processed_text)
     except Exception:
         pass
 
     try:
-        start = current_text.find("{")
-        end = current_text.rfind("}")
+        start = processed_text.find("{")
+        end = processed_text.rfind("}")
         if start != -1 and end != -1:
-            return json.loads(current_text[start:end+1])
+            return json.loads(processed_text[start:end+1])
     except Exception:
         pass
         
@@ -145,7 +145,7 @@ async def draft_video(req: DraftRequest):
         err_str = redact_sensitive(str(e))
         if "API_KEY_INVALID" in err_str or "expired" in err_str.lower():
             return JSONResponse(status_code=401, content={"error": "API_KEY_EXPIRED"})
-        raise HTTPException(status_code=500, detail=err_str)
+        return JSONResponse(status_code=500, content={"error": err_str})
 
 @app.post("/v1/analyzer/storyboard")
 async def storyboard(req: StoryboardRequest):

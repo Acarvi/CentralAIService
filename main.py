@@ -84,7 +84,8 @@ def _safe_json_loads(text: str) -> dict:
         pass
         
     letters = "a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9"
-    processed_text = re.sub(rf'(?<=[{letters}\s！？。，])"(?=[{letters}\s！？。，])', r'\"', processed_text)
+    # Escapar comillas solo si están rodeadas de letras (caso muy específico)
+    processed_text = re.sub(rf'(?<=[{letters}])"(?=[{letters}])', r'\"', processed_text)
     processed_text = re.sub(rf'(?<=[{letters}\s])"(?=[.!?])', r'\"', processed_text)
 
     try:
@@ -100,7 +101,11 @@ def _safe_json_loads(text: str) -> dict:
     except Exception:
         pass
         
-    return json.loads(processed_text)
+    try:
+        return json.loads(processed_text)
+    except Exception as e:
+        logger.error(f"❌ Failed to parse JSON even after cleaning. Text: {processed_text[:200]}...")
+        raise ValueError(f"Invalid JSON response from model: {str(e)}")
 
 @app.get("/health")
 async def health():
@@ -141,6 +146,10 @@ async def draft_video(req: DraftRequest):
             time.sleep(2)
             video_file = client.files.get(name=video_file.name)
 
+        if video_file.state == "FAILED":
+            logger.error(f"❌ Gemini falló al procesar el video: {video_file.name}")
+            raise HTTPException(status_code=500, detail="Gemini failed to process the video file.")
+
         prompt = req.custom_prompt or "Analiza este video y crea un guion JSON con escenas (solo narración)."
         if req.global_comments:
             prompt = f"{prompt}\n\nCOMENTARIOS ADICIONALES DEL USUARIO:\n{req.global_comments}"
@@ -159,7 +168,13 @@ async def draft_video(req: DraftRequest):
         duration = (datetime.now() - start_time).total_seconds()
         logger.info(f"✨ Gemini respondió en {duration:.2f}s")
         
-        return _safe_json_loads(response.text)
+        try:
+            return _safe_json_loads(response.text)
+        except ValueError as ve:
+            logger.error(f"💥 Error de parseo JSON: {ve}")
+            return JSONResponse(status_code=500, content={"error": str(ve), "raw_response": response.text[:500]})
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"💥 Error en /analyzer/draft: {e}")
         traceback.print_exc()

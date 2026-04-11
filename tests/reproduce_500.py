@@ -10,7 +10,7 @@ if not os.path.exists(video_path):
     # Try another common one
     video_path = "temp_input.mp4"
 
-print(f"🚀 Testing /v1/analyzer/draft with video: {video_path}")
+print(f"Testing /v1/analyzer/draft with video: {video_path}")
 
 payload = {
     "video_path": video_path,

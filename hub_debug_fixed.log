@@ -1,0 +1,36 @@
+python : INFO:     
+Started server process 
+[37624]
+At line:1 char:1
++ python main.py > 
+hub_debug.log 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~
+    + CategoryInfo     
+         : NotSpecifi  
+  ed: (INFO:     Sta   
+ rted server proces    
+s [37624]:String)     
+[], RemoteExceptio    n
+    + FullyQualifiedEr 
+   rorId : NativeComm  
+  andError
+ 
+INFO:     Waiting for 
+application startup.
+INFO:     Application 
+startup complete.
+ERROR:    [Errno 
+10048] error while 
+attempting to bind on 
+address ('0.0.0.0', 
+8080): [winerror 
+10048] only one usage 
+of each socket address 
+(protocol/network 
+address/port) is 
+normally permitted
+INFO:     Waiting for 
+application shutdown.
+INFO:     Application 
+shutdown complete.

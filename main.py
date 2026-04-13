@@ -70,6 +70,12 @@ class RefineRequest(BaseModel):
     feedback: str
     global_comments: str = ""
 
+class AiGenerateRequest(BaseModel):
+    prompt: str
+    model: str = "gemini-2.0-flash"
+    response_mime_type: str = "text/plain"
+    system_instruction: Optional[str] = None
+
 def _safe_json_loads(text: str) -> dict:
     """Robust JSON parsing for LLM responses."""
     import re
@@ -99,6 +105,8 @@ def _safe_json_loads(text: str) -> dict:
     # Escapar comillas solo si están rodeadas de letras (caso muy específico)
     processed_text = re.sub(rf'(?<=[{letters}])"(?=[{letters}])', r'\"', processed_text)
     processed_text = re.sub(rf'(?<=[{letters}\s])"(?=[.!?])', r'\"', processed_text)
+    # Extra robustness: escape internal quotes if they aren't part of a key or value boundary
+    processed_text = re.sub(r'(?<![\[\],:{])"(?![\]\},:{])', r'\"', processed_text)
 
     try:
         return json.loads(processed_text)
@@ -123,18 +131,37 @@ def _safe_json_loads(text: str) -> dict:
 async def health():
     comfy_status = "offline"
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"{COMFYUI_URL}/queue")
+        async with httpx.AsyncClient(timeout=2.0) as client_http:
+            resp = await client_http.get(f"{COMFYUI_URL}/queue")
             if resp.status_code == 200:
                 comfy_status = "online"
     except Exception:
         pass
 
+    gemini_status = "offline"
+    try:
+        # Lightweight check: list models
+        for _ in client.models.list(config=types.ListModelsConfig(page_size=1)):
+            break
+        gemini_status = "online"
+    except Exception as e:
+        logger.error(f"❌ Gemini Health Check Failed: {e}")
+
+    # Sentinel Check
+    sentinel_status = "offline"
+    try:
+        from log_sanitizer import RedactedStream
+        if isinstance(sys.stdout, RedactedStream):
+            sentinel_status = "active"
+    except: pass
+
     return {
-        "status": "ok",
+        "status": "ok" if gemini_status == "online" else "error",
         "timestamp": time.time(),
+        "sentinel": sentinel_status,
         "dependencies": {
-            "comfyui": comfy_status
+            "comfyui": comfy_status,
+            "gemini": gemini_status
         }
     }
 
@@ -237,6 +264,30 @@ async def refine(req: RefineRequest):
         return _safe_json_loads(response.text)
     except Exception as e:
         logger.error(f"💥 Error en /analyzer/refine: {e}")
+        return JSONResponse(status_code=500, content={"error": redact_sensitive(str(e))})
+
+@app.post("/v1/ai/generate")
+async def generate_content(req: AiGenerateRequest):
+    """Generic AI generation endpoint for peripheral services."""
+    logger.info(f"📥 Petición genérica de IA recibida.")
+    try:
+        config = types.GenerateContentConfig(
+            response_mime_type=req.response_mime_type,
+            system_instruction=req.system_instruction if req.system_instruction else None
+        )
+        
+        start_time = datetime.now()
+        response = client.models.generate_content(
+            model=req.model,
+            contents=req.prompt,
+            config=config
+        )
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info(f"✨ Gemini respondió en {duration:.2f}s")
+        
+        return {"text": response.text}
+    except Exception as e:
+        logger.error(f"💥 Error en /v1/ai/generate: {e}")
         return JSONResponse(status_code=500, content={"error": redact_sensitive(str(e))})
 
 @app.api_route("/v1/comfyui/proxy/{path:path}", methods=["GET", "POST"])

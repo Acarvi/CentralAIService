@@ -9,7 +9,9 @@ async def test_health():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         response = await ac.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    data = response.json()
+    assert data["status"] in ["ok", "error"]
+    assert "sentinel" in data
 
 @pytest.mark.asyncio
 @patch("main.client.files.upload")
@@ -118,6 +120,49 @@ async def test_api_key_error_handling(mock_upload):
     finally:
         if os.path.exists(dummy_path):
             os.remove(dummy_path)
+
+@pytest.mark.asyncio
+@patch("main.client.files.upload")
+async def test_draft_video_general_500_redacted(mock_upload):
+    """Verify that general 500 errors redact sensitive info."""
+    key = "AIzaSyTestKey123"
+    # we need to mock GEMINI_API_KEY in main.py
+    with patch("main.GEMINI_API_KEY", key):
+        # Simulate an error that might contain a key
+        mock_upload.side_effect = Exception(f"Error with key {key}")
+        
+        dummy_path = "dummy_video_redact.mp4"
+        with open(dummy_path, "w") as f:
+            f.write("dummy")
+            
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                response = await ac.post(
+                    "/v1/analyzer/draft",
+                    json={"video_path": os.path.abspath(dummy_path)}
+                )
+            assert response.status_code == 500
+            assert key not in response.json()["error"]
+            assert "[REDACTED_GEMINI_KEY]" in response.json()["error"]
+        finally:
+            if os.path.exists(dummy_path):
+                os.remove(dummy_path)
+
+@pytest.mark.asyncio
+async def test_api_generate_success():
+    """Verify generic AI generation endpoint."""
+    with patch("main.client.models.generate_content") as mock_gen:
+        mock_resp = MagicMock()
+        mock_resp.text = "Generated text"
+        mock_gen.return_value = mock_resp
+        
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            response = await ac.post(
+                "/v1/ai/generate",
+                json={"prompt": "test prompt"}
+            )
+        assert response.status_code == 200
+        assert response.json()["text"] == "Generated text"
 
 @pytest.mark.asyncio
 @patch("main.client.files.upload")

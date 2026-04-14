@@ -12,6 +12,7 @@ except ImportError:
     print("⚠️ Warning: SentinelAPI module not found. Proceeding with caution.")
 
 import json
+import re
 import time
 import httpx
 import logging
@@ -77,54 +78,63 @@ class AiGenerateRequest(BaseModel):
     system_instruction: Optional[str] = None
 
 def _safe_json_loads(text: str) -> dict:
-    """Robust JSON parsing for LLM responses."""
-    import re
+    """Robust JSON parsing for LLM responses using contextual repair."""
     processed_text = text.strip()
     if processed_text.startswith("```"):
         start = processed_text.find("{")
         end = processed_text.rfind("}")
         if start != -1 and end != -1:
             processed_text = processed_text[start:end+1]
+    
+    # Simple attempts first
     try:
         return json.loads(processed_text)
     except Exception:
         pass
 
-    current_text = processed_text
-    current_text = re.sub(r',\s*}', '}', current_text)
-    current_text = re.sub(r',\s*\]', ']', current_text)
-    current_text = re.sub(r'}\s*{', '}, {', current_text)
-    current_text = re.sub(r'\]\s*{', '], {', current_text)
+    # Stage 2: Contextual Repair of Internal Quotes
+    repaired_text = ""
+    in_string = False
+    escape = False
+    
+    for i, char in enumerate(processed_text):
+        if char == '\\' and not escape:
+            escape = True
+            repaired_text += char
+            continue
+            
+        if char == '"' and not escape:
+            is_structural = False
+            prev_chars = processed_text[:i].strip()
+            next_chars = processed_text[i+1:].strip()
+            
+            if not in_string:
+                # Potential Value/Key opening
+                if not prev_chars or prev_chars[-1] in '{[:,' :
+                    is_structural = True
+            else:
+                # Potential Value/Key closing
+                if not next_chars or next_chars[0] in '}\],:':
+                    is_structural = True
+            
+            if is_structural:
+                in_string = not in_string
+                repaired_text += char
+            else:
+                repaired_text += '\\"' # Escape internal quote
+        else:
+            repaired_text += char
+            
+        escape = False
+
+    # Stage 3: Common structural cleanup
+    repaired_text = re.sub(r',\s*}', '}', repaired_text)
+    repaired_text = re.sub(r',\s*\]', ']', repaired_text)
     
     try:
-        return json.loads(current_text)
-    except Exception:
-        pass
-        
-    letters = "a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9"
-    # Escapar comillas solo si están rodeadas de letras (caso muy específico)
-    processed_text = re.sub(rf'(?<=[{letters}])"(?=[{letters}])', r'\"', processed_text)
-    processed_text = re.sub(rf'(?<=[{letters}\s])"(?=[.!?])', r'\"', processed_text)
-    # Extra robustness: escape internal quotes if they aren't part of a key or value boundary
-    processed_text = re.sub(r'(?<![\[\],:{])"(?![\]\},:{])', r'\"', processed_text)
-
-    try:
-        return json.loads(processed_text)
-    except Exception:
-        pass
-
-    try:
-        start = processed_text.find("{")
-        end = processed_text.rfind("}")
-        if start != -1 and end != -1:
-            return json.loads(processed_text[start:end+1])
-    except Exception:
-        pass
-        
-    try:
-        return json.loads(processed_text)
+        return json.loads(repaired_text)
     except Exception as e:
-        logger.error(f"❌ Failed to parse JSON even after cleaning. Text: {processed_text[:200]}...")
+        logger.error(f"❌ Failed to parse JSON even after contextual repair. Original: {processed_text[:100]}")
         raise ValueError(f"Invalid JSON response from model: {str(e)}")
 
 @app.get("/health")
@@ -140,10 +150,11 @@ async def health():
 
     gemini_status = "offline"
     try:
-        # Lightweight check: list models
-        for _ in client.models.list(config=types.ListModelsConfig(page_size=1)):
-            break
-        gemini_status = "online"
+        # Check if client is initialized
+        if GEMINI_API_KEY:
+             for _ in client.models.list(config=types.ListModelsConfig(page_size=1)):
+                 gemini_status = "online"
+                 break
     except Exception as e:
         logger.error(f"❌ Gemini Health Check Failed: {e}")
 

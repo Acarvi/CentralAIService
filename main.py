@@ -1,5 +1,8 @@
 import os
+import sys
+
 import json
+import re
 import time
 import httpx
 import logging
@@ -58,66 +61,108 @@ class RefineRequest(BaseModel):
     feedback: str
     global_comments: str = ""
 
+class AiGenerateRequest(BaseModel):
+    prompt: str
+    model: str = "gemini-2.0-flash"
+    response_mime_type: str = "text/plain"
+    system_instruction: Optional[str] = None
+
 def _safe_json_loads(text: str) -> dict:
-    """Robust JSON parsing for LLM responses."""
-    import re
+    """Robust JSON parsing for LLM responses using contextual repair."""
     processed_text = text.strip()
     if processed_text.startswith("```"):
         start = processed_text.find("{")
         end = processed_text.rfind("}")
         if start != -1 and end != -1:
             processed_text = processed_text[start:end+1]
+    
+    # Simple attempts first
     try:
         return json.loads(processed_text)
     except Exception:
         pass
 
-    current_text = processed_text
-    current_text = re.sub(r',\s*}', '}', current_text)
-    current_text = re.sub(r',\s*\]', ']', current_text)
-    current_text = re.sub(r'}\s*{', '}, {', current_text)
-    current_text = re.sub(r'\]\s*{', '], {', current_text)
+    # Stage 2: Contextual Repair of Internal Quotes
+    repaired_text = ""
+    in_string = False
+    escape = False
+    
+    for i, char in enumerate(processed_text):
+        if char == '\\' and not escape:
+            escape = True
+            repaired_text += char
+            continue
+            
+        if char == '"' and not escape:
+            is_structural = False
+            prev_chars = processed_text[:i].strip()
+            next_chars = processed_text[i+1:].strip()
+            
+            if not in_string:
+                # Potential Value/Key opening
+                if not prev_chars or prev_chars[-1] in '{[:,' :
+                    is_structural = True
+            else:
+                # Potential Value/Key closing
+                if not next_chars or next_chars[0] in '}\],:':
+                    is_structural = True
+            
+            if is_structural:
+                in_string = not in_string
+                repaired_text += char
+            else:
+                repaired_text += '\\"' # Escape internal quote
+        else:
+            repaired_text += char
+            
+        escape = False
+
+    # Stage 3: Common structural cleanup
+    repaired_text = re.sub(r',\s*}', '}', repaired_text)
+    repaired_text = re.sub(r',\s*\]', ']', repaired_text)
     
     try:
-        return json.loads(current_text)
-    except Exception:
-        pass
-        
-    letters = "a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9"
-    processed_text = re.sub(rf'(?<=[{letters}\s！？。，])"(?=[{letters}\s！？。，])', r'\"', processed_text)
-    processed_text = re.sub(rf'(?<=[{letters}\s])"(?=[.!?])', r'\"', processed_text)
-
-    try:
-        return json.loads(processed_text)
-    except Exception:
-        pass
-
-    try:
-        start = processed_text.find("{")
-        end = processed_text.rfind("}")
-        if start != -1 and end != -1:
-            return json.loads(processed_text[start:end+1])
-    except Exception:
-        pass
-        
-    return json.loads(processed_text)
+        return json.loads(repaired_text)
+    except Exception as e:
+        logger.error(f"❌ Failed to parse JSON even after contextual repair. Original: {processed_text[:100]}")
+        raise ValueError(f"Invalid JSON response from model: {str(e)}")
 
 @app.get("/health")
 async def health():
     comfy_status = "offline"
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"{COMFYUI_URL}/queue")
+        async with httpx.AsyncClient(timeout=2.0) as client_http:
+            resp = await client_http.get(f"{COMFYUI_URL}/queue")
             if resp.status_code == 200:
                 comfy_status = "online"
     except Exception:
         pass
 
+    gemini_status = "offline"
+    try:
+        # Check if client is initialized
+        if GEMINI_API_KEY:
+             for _ in client.models.list(config=types.ListModelsConfig(page_size=1)):
+                 gemini_status = "online"
+                 break
+    except Exception as e:
+        logger.error(f"❌ Gemini Health Check Failed: {e}")
+
+    # Sentinel Check
+    sentinel_status = "offline"
+    try:
+        from log_sanitizer import RedactedStream
+        if isinstance(sys.stdout, RedactedStream):
+            sentinel_status = "active"
+    except: pass
+
     return {
-        "status": "ok",
+        "status": "ok" if gemini_status == "online" else "error",
         "timestamp": time.time(),
+        "sentinel": sentinel_status,
         "dependencies": {
-            "comfyui": comfy_status
+            "comfyui": comfy_status,
+            "gemini": gemini_status
         }
     }
 
@@ -141,6 +186,10 @@ async def draft_video(req: DraftRequest):
             time.sleep(2)
             video_file = client.files.get(name=video_file.name)
 
+        if video_file.state == "FAILED":
+            logger.error(f"❌ Gemini falló al procesar el video: {video_file.name}")
+            raise HTTPException(status_code=500, detail="Gemini failed to process the video file.")
+
         prompt = req.custom_prompt or "Analiza este video y crea un guion JSON con escenas (solo narración)."
         if req.global_comments:
             prompt = f"{prompt}\n\nCOMENTARIOS ADICIONALES DEL USUARIO:\n{req.global_comments}"
@@ -159,7 +208,13 @@ async def draft_video(req: DraftRequest):
         duration = (datetime.now() - start_time).total_seconds()
         logger.info(f"✨ Gemini respondió en {duration:.2f}s")
         
-        return _safe_json_loads(response.text)
+        try:
+            return _safe_json_loads(response.text)
+        except ValueError as ve:
+            logger.error(f"💥 Error de parseo JSON: {ve}")
+            return JSONResponse(status_code=500, content={"error": str(ve), "raw_response": response.text[:500]})
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"💥 Error en /analyzer/draft: {e}")
         traceback.print_exc()
@@ -210,6 +265,30 @@ async def refine(req: RefineRequest):
         return _safe_json_loads(response.text)
     except Exception as e:
         logger.error(f"💥 Error en /analyzer/refine: {e}")
+        return JSONResponse(status_code=500, content={"error": redact_sensitive(str(e))})
+
+@app.post("/v1/ai/generate")
+async def generate_content(req: AiGenerateRequest):
+    """Generic AI generation endpoint for peripheral services."""
+    logger.info(f"📥 Petición genérica de IA recibida.")
+    try:
+        config = types.GenerateContentConfig(
+            response_mime_type=req.response_mime_type,
+            system_instruction=req.system_instruction if req.system_instruction else None
+        )
+        
+        start_time = datetime.now()
+        response = client.models.generate_content(
+            model=req.model,
+            contents=req.prompt,
+            config=config
+        )
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info(f"✨ Gemini respondió en {duration:.2f}s")
+        
+        return {"text": response.text}
+    except Exception as e:
+        logger.error(f"💥 Error en /v1/ai/generate: {e}")
         return JSONResponse(status_code=500, content={"error": redact_sensitive(str(e))})
 
 @app.api_route("/v1/comfyui/proxy/{path:path}", methods=["GET", "POST"])

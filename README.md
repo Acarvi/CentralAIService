@@ -35,3 +35,31 @@ Estado del servicio.
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8080
 ```
+
+## Configuración Segura (GEMINI_API_KEY)
+
+Este servicio lee `GEMINI_API_KEY` **solo** desde variables de entorno. No hardcodees claves en el código ni las subas a Git.
+
+1. Crea tu archivo `.env` desde el ejemplo:
+   - Copia `.env.example` a `.env`
+   - Rellena `GEMINI_API_KEY` con tu clave real
+   - Nunca commitees `.env` (está ignorado por Git)
+
+2. Opciones en PowerShell (Windows):
+
+Temporal (solo sesión actual):
+```powershell
+$env:GEMINI_API_KEY="your_key"
+python -m uvicorn main:app --host 0.0.0.0 --port 8080
+```
+
+Persistente (usuario):
+```powershell
+setx GEMINI_API_KEY "your_key"
+```
+Luego reinicia PowerShell y arranca el servicio:
+```powershell
+python -m uvicorn main:app --host 0.0.0.0 --port 8080
+```
+
+Nota: El servicio no imprime la key. Si `GEMINI_API_KEY` falta, los endpoints que requieren Gemini responden con un error claro.

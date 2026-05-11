@@ -33,6 +33,13 @@ client = genai.Client(
 
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://localhost:8188")
 
+def _ensure_gemini_configured():
+    if not GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="GEMINI_API_KEY not set. Configure it via environment variables (.env is supported locally).",
+        )
+
 def redact_sensitive(text: str) -> str:
     """Robust redaction of API keys and secrets."""
     if not text:
@@ -113,16 +120,42 @@ async def health():
     except Exception:
         pass
 
+    gemini_status = "offline"
+    gemini_detail = None
+    try:
+        # Check if client is initialized
+        if not GEMINI_API_KEY:
+            gemini_status = "missing_key"
+            gemini_detail = "GEMINI_API_KEY not set"
+        else:
+             for _ in client.models.list(config=types.ListModelsConfig(page_size=1)):
+                 gemini_status = "online"
+                 break
+    except Exception as e:
+        logger.error(f"❌ Gemini Health Check Failed: {e}")
+        gemini_detail = redact_sensitive(str(e))
+
+    # Sentinel Check
+    sentinel_status = "offline"
+    try:
+        from log_sanitizer import RedactedStream
+        if isinstance(sys.stdout, RedactedStream):
+            sentinel_status = "active"
+    except: pass
+
     return {
         "status": "ok",
         "timestamp": time.time(),
         "dependencies": {
-            "comfyui": comfy_status
+            "comfyui": comfy_status,
+            "gemini": gemini_status,
+            "gemini_detail": gemini_detail,
         }
     }
 
 @app.post("/v1/analyzer/draft")
 async def draft_video(req: DraftRequest):
+    _ensure_gemini_configured()
     logger.info(f"📥 Petición recibida: /v1/analyzer/draft | Video: {os.path.basename(req.video_path)}")
     if not os.path.exists(req.video_path):
         logger.warning(f"❌ Video no encontrado: {req.video_path}")
@@ -170,6 +203,7 @@ async def draft_video(req: DraftRequest):
 
 @app.post("/v1/analyzer/storyboard")
 async def storyboard(req: StoryboardRequest):
+    _ensure_gemini_configured()
     logger.info("📥 Petición recibida: /v1/analyzer/storyboard")
     try:
         prompt = "Decide visuales (image/animation) para este guion JSON."
@@ -191,6 +225,7 @@ async def storyboard(req: StoryboardRequest):
 
 @app.post("/v1/analyzer/refine")
 async def refine(req: RefineRequest):
+    _ensure_gemini_configured()
     logger.info("📥 Petición recibida: /v1/analyzer/refine")
     try:
         prompt = f"""
